@@ -18,7 +18,7 @@ Teste de Iman-Davenport -> Teste post-hoc de Friedman com correção de Bergmann
 - Numero min e max de linhas?
 - Numero min e max de colunas?
 
-###### 1.2 - Abordagem bayesiana
+##### 1.2 - Abordagem bayesiana
 - Entender a chance de estar em cada colocação
 - Entender a probabilidade de X ser melhor que Y
 - Entender a probabildiade de empate entre os algoritmos
