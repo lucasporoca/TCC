@@ -1,10 +1,3 @@
-# Abordagem
-
-# Teste de Iman-Davenport -> Teste post-hoc de Friedman com correção de Bergmann e Hommel
-# https://jmlr.org/papers/v7/demsar06a.html
-# https://www.jmlr.org/papers/v9/garcia08a.html
-# https://journal.r-project.org/articles/RJ-2016-017/RJ-2016-017.pdf
-
 install.packages("remotes")
 install.packages("tidyverse")
 
