@@ -14,7 +14,7 @@ Para ranquear as técnicas de pré-processamento de forma robusta, utilizaremos 
 - Natureza: Datasets reais não pré-processados.
 - Volume: Número de Instâncias ≥ 300.
 - Proporção Numérica: ≥ 1/3 das features devem ser contínuas (cálculo pós-OHE).
-- Estabilidade: Events Per Variable (EPV) ≥ 3 (cálculo Downsampling).
+- Estabilidade: Events Per Variable (EPV) ≥ 3 (cálculo pós-Downsampling).
 
 #### 1.3 - Padronização
 
