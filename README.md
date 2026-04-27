@@ -1,7 +1,7 @@
 ## Impacto de Técnicas de Pré-processamento de Dados no Desempenho de Algoritmos de Classificação Binária
 
 ### 1 - Seleção e Padronização de Dados
-Para ranquear as técnicas de pré-processamento de forma robusta, utilizaremos o teste de Iman-Davenport seguido do post-hoc de Friedman. Como vamos comparar 14 abordagens simultâneas (13 técnicas + 1 baseline), a regra estatística (N>2k) exige que tenhamos pelo menos 28 bases de dados. (https://www.jmlr.org/papers/v7/demsar06a.html)
+Para ranquear as técnicas de pré-processamento de forma robusta, utilizaremos o teste de Iman-Davenport seguido do post-hoc de Friedman. Como vamos comparar 14 abordagens simultâneas (13 técnicas + 1 baseline), a regra estatística (N>2k) exige que tenhamos pelo menos 28 bases de dados.
 
 #### 1.1 -  Origem (Repositórios de Benchmark)
 
