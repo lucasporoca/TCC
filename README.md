@@ -1,14 +1,14 @@
-### Impacto de Técnicas de Pré-processamento de Dados no Desempenho de Algoritmos de Classificação Binária
+## Impacto de Técnicas de Pré-processamento de Dados no Desempenho de Algoritmos de Classificação Binária
 
-#### 1 - Seleção e Padronização de Dados
+### 1 - Seleção e Padronização de Dados
 Para ranquear as técnicas de pré-processamento de forma robusta, utilizaremos o teste de Iman-Davenport seguido do post-hoc de Friedman. Como vamos comparar 14 abordagens simultâneas (13 técnicas + 1 baseline), a regra estatística (N>2k) exige que tenhamos pelo menos 28 bases de dados. (https://www.jmlr.org/papers/v7/demsar06a.html)
 
-##### 1.1 -  Origem (Repositórios de Benchmark)
+#### 1.1 -  Origem (Repositórios de Benchmark)
 
 - OpenML (Suítes: CC18, OpenML100 e AutoML).
 - PMLB (Penn Machine Learning Benchmarks).
 
-##### 1.2 - Critérios de Inclusão e Filtragem
+#### 1.2 - Critérios de Inclusão e Filtragem
 
 - Escopo: Exclusivamente problemas de Classificação Binária.
 - Natureza: Datasets reais não pré-processados.
@@ -16,7 +16,7 @@ Para ranquear as técnicas de pré-processamento de forma robusta, utilizaremos 
 - Proporção Numérica: ≥ 1/3 das features devem ser contínuas (cálculo pós-OHE).
 - Estabilidade: Events Per Variable (EPV) ≥ 3.
 
-##### 1.3 - Padronização
+#### 1.3 - Padronização
 
 - Downsampling: Amostragem estratificada limitando bases gigantes a 10.000 instâncias.
 - Tratamento de Esparsidade: Remoção de variáveis com > 50% de dados faltantes (NAs).
