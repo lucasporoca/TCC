@@ -1,0 +1,10 @@
+Original_Name,Standard_Name
+Favorite_Name,NUM_00
+Favorite_Points,NUM_01
+Pointspread,NUM_02
+Underdog_Points,NUM_03
+Underdog_name,NUM_04
+Week,NUM_05
+Overtime,CAT_00
+Weekday,CAT_01
+Year,CAT_02

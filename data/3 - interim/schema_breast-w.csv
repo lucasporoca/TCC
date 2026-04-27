@@ -1,0 +1,10 @@
+Original_Name,Standard_Name
+Bare_Nuclei,NUM_00
+Bland_Chromatin,NUM_01
+Cell_Shape_Uniformity,NUM_02
+Cell_Size_Uniformity,NUM_03
+Clump_Thickness,NUM_04
+Marginal_Adhesion,NUM_05
+Normal_Nucleoli,NUM_06
+Single_Epi_Cell_Size,NUM_07
+Mitoses,CAT_00
