@@ -186,9 +186,9 @@ def run_experiment(file_path, output_dir):
                     tracemalloc.clear_traces()
                     tracemalloc.reset_peak()
                     
-                    t0_fit = time.time()
+                    t0_fit = time.process_time()
                     pipeline.fit(X_train, y_train)
-                    fit_time = time.time() - t0_fit
+                    fit_time = time.process_time() - t0_fit
                     
                     _, py_peak_mem = tracemalloc.get_traced_memory()
                     tracemalloc.stop()
@@ -202,18 +202,18 @@ def run_experiment(file_path, output_dir):
                         
                     disk_size = len(pickle.dumps(pipeline)) / (1024 * 1024)
 
-                    t0_pred_train = time.time()
+                    t0_pred_train = time.process_time()
                     y_train_pred = pipeline.predict(X_train)
-                    pred_time_train = time.time() - t0_pred_train
+                    pred_time_train = time.process_time() - t0_pred_train
                     y_train_scores = get_positive_scores(pipeline, X_train)
                     
                     tn_tr, fp_tr, fn_tr, tp_tr = confusion_matrix(y_train, y_train_pred, labels=[0, 1]).ravel()
                     roc_tr = roc_auc_score(y_train, y_train_scores)
                     pr_tr = average_precision_score(y_train, y_train_scores)
 
-                    t0_pred_test = time.time()
+                    t0_pred_test = time.process_time()
                     y_test_pred = pipeline.predict(X_test)
-                    pred_time_test = time.time() - t0_pred_test
+                    pred_time_test = time.process_time() - t0_pred_test
                     y_test_scores = get_positive_scores(pipeline, X_test)
                     
                     tn_te, fp_te, fn_te, tp_te = confusion_matrix(y_test, y_test_pred, labels=[0, 1]).ravel()
@@ -266,7 +266,7 @@ INPUT_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, '../data/3 - interim'))
 OUTPUT_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, '../data/4 - results'))
 
 ASK_TO_CONTINUE = True
-TIMEOUT_SECONDS = 180
+TIMEOUT_SECONDS = 10
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
