@@ -40,6 +40,4 @@ cpu_frac_busy,CAT_00
 disk_max_active,CAT_01
 disk_max_total,CAT_02
 io_lwrite,CAT_03
-io_namei,CAT_04
-net_frac_busy,CAT_05
-net_max_total,CAT_06
+net_max_total,CAT_04
