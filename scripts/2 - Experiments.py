@@ -21,7 +21,7 @@ from sklearn.naive_bayes import GaussianNB
 from sklearn.linear_model import LogisticRegression
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier 
 from sklearn.neural_network import MLPClassifier
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.metrics import confusion_matrix, roc_auc_score, matthews_corrcoef
