@@ -11,9 +11,8 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
-from sklearn.base import clone 
+from sklearn.base import clone, BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
-from sklearn.feature_selection import VarianceThreshold
 from sklearn.preprocessing import (OneHotEncoder, PowerTransformer, QuantileTransformer, 
                                    MinMaxScaler, StandardScaler, RobustScaler, 
                                    KBinsDiscretizer, LabelEncoder)
@@ -73,7 +72,6 @@ def optimize_threshold_mcc(y_true, y_scores):
     
     for t in thresholds:
         y_pred_t = (y_scores >= t).astype(int)
-        
         mcc = matthews_corrcoef(y_true, y_pred_t)
         
         if mcc > best_mcc:
@@ -91,34 +89,83 @@ def get_positive_scores(pipeline, X_data):
     else:
         return pipeline.decision_function(X_data)
 
-def trim_outliers(X, y, method, fold, cols):
-    trimmer = OutlierTrimmer(capping_method=method, tail='both', fold=fold, variables=cols)
+def outlier_trimmer(X, y, method, fold, cols):
+    valid_cols = []
+    for c in cols:
+        if c not in X.columns:
+            continue
+            
+        if method == 'iqr':
+            q1, q3 = X[c].quantile([0.25, 0.75])
+            if q1 != q3:
+                valid_cols.append(c)
+        elif method == 'quantiles':
+            q_low, q_high = X[c].quantile([fold, 1 - fold])
+            if q_low != q_high:
+                valid_cols.append(c)
+                
+    if not valid_cols:
+        return X, y
+
+    trimmer = OutlierTrimmer(capping_method=method, tail='both', fold=fold, variables=valid_cols)
     X_res = trimmer.fit_transform(X)
+    
+    if len(X_res) <= len(X) * 0.80:
+        return X, y
+        
     return X_res, y.loc[X_res.index]
+
+class OutlierCapper(BaseEstimator, TransformerMixin):
+    def __init__(self, capping_method='iqr', tail='both', fold=1.5):
+        self.capping_method = capping_method
+        self.tail = tail
+        self.fold = fold
+        self.capper_ = None
+        
+    def fit(self, X, y=None):
+        valid_cols = []
+        for c in X.columns:
+            if self.capping_method == 'iqr':
+                q1, q3 = X[c].quantile([0.25, 0.75])
+                if q1 != q3:
+                    valid_cols.append(c)
+            elif self.capping_method == 'quantiles':
+                q_low, q_high = X[c].quantile([self.fold, 1 - self.fold])
+                if q_low != q_high:
+                    valid_cols.append(c)
+                    
+        if valid_cols:
+            self.capper_ = Winsorizer(
+                capping_method=self.capping_method, 
+                tail=self.tail, 
+                fold=self.fold, 
+                variables=valid_cols
+            )
+            self.capper_.fit(X)
+        else:
+            self.capper_ = None
+            
+        return self
+
+    def transform(self, X):
+        if self.capper_ is not None:
+            return self.capper_.transform(X)
+        return X
 
 def build_pipeline(model_obj, prep_obj, num_cols, cat_cols):
     model_cloned = clone(model_obj)
-    
-    if isinstance(prep_obj, str):
-        prep_cloned = prep_obj
-    else:
-        prep_cloned = clone(prep_obj)
+    prep_cloned = prep_obj if isinstance(prep_obj, str) else clone(prep_obj)
 
     transformers = []
     sampler = None
     
-    num_steps =[
-        ('variance_filter', VarianceThreshold(threshold=0.001))
-    ]
-
     if isinstance(prep_cloned, (SMOTE, SMOTENC, RandomUnderSampler, FunctionSampler)):
         sampler = prep_cloned
+        num_transformer = 'passthrough'
     else:
-        if prep_cloned != 'passthrough':
-            num_steps.append(('scaler_or_transformer', prep_cloned))
+        num_transformer = prep_cloned 
 
-    num_pipe = ImbPipeline(num_steps)
-    transformers.append(('num', num_pipe, num_cols))
+    transformers.append(('num', num_transformer, num_cols))
 
     if cat_cols:
         cat_pipe = ImbPipeline([
@@ -132,7 +179,7 @@ def build_pipeline(model_obj, prep_obj, num_cols, cat_cols):
         verbose_feature_names_out=False
     )
 
-    steps =[]
+    steps = []
     if sampler:
         steps.append(('sampler', sampler))
         
@@ -155,9 +202,9 @@ def run_experiment(file_path, output_dir):
     y = pd.Series(LabelEncoder().fit_transform(y_raw), index=X.index)
     
     num_cols = [c for c in X.columns if c.startswith('NUM')]
-    cat_cols =[c for c in X.columns if c.startswith('CAT')]
+    cat_cols = [c for c in X.columns if c.startswith('CAT')]
 
-    cat_indices =[X.columns.get_loc(c) for c in cat_cols]
+    cat_indices = [X.columns.get_loc(c) for c in cat_cols]
 
     models = {
         'GaussianNB': GaussianNB(),
@@ -175,10 +222,10 @@ def run_experiment(file_path, output_dir):
 
     preprocessors = {
         'Baseline': 'passthrough',
-        'IQR Capping': Winsorizer(capping_method='iqr', tail='both', fold=1.5),
-        'Quantile Capping': Winsorizer(capping_method='quantiles', tail='both', fold=0.05),
-        'IQR Removal': FunctionSampler(func=trim_outliers, kw_args={'method': 'iqr', 'fold': 1.5, 'cols': num_cols}, validate=False),
-        'Quantile Removal': FunctionSampler(func=trim_outliers, kw_args={'method': 'quantiles', 'fold': 0.05, 'cols': num_cols}, validate=False),
+        'IQR Capping': OutlierCapper(capping_method='iqr', tail='both', fold=1.5),
+        'Quantile Capping': OutlierCapper(capping_method='quantiles', tail='both', fold=0.01),
+        'IQR Removal': FunctionSampler(func=outlier_trimmer, kw_args={'method': 'iqr', 'fold': 1.5, 'cols': num_cols}, validate=False),
+        'Quantile Removal': FunctionSampler(func=outlier_trimmer, kw_args={'method': 'quantiles', 'fold': 0.01, 'cols': num_cols}, validate=False),
         'Yeo-Johnson': PowerTransformer(method='yeo-johnson'),
         'Quantile Transform': QuantileTransformer(output_distribution='normal', random_state=42),
         'Min-Max Scaler': MinMaxScaler(),
@@ -191,7 +238,7 @@ def run_experiment(file_path, output_dir):
     }
 
     cv = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
-    results =[]
+    results = []
     
     pbar = tqdm(total=len(models) * len(preprocessors), desc=dataset_name, leave=False, position=1)
 
@@ -295,7 +342,7 @@ if __name__ == "__main__":
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    csv_files =[f for f in os.listdir(INPUT_DIR) if f.endswith('.csv')]
+    csv_files = [f for f in os.listdir(INPUT_DIR) if f.endswith('.csv')]
 
     pbar_overall = tqdm(total=len(csv_files), desc="Overall", position=0, leave=True)
 
