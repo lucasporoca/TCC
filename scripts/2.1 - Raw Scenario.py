@@ -1,36 +1,45 @@
-import os
 import gc
-import time
-import winsound
-import msvcrt
-import warnings
-import tracemalloc
-import traceback
+import os
 import pickle
+import time
+import traceback
+import tracemalloc
+import warnings
+
+import msvcrt
+import winsound
+
 import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
-from sklearn.base import clone, BaseEstimator, TransformerMixin
-from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import (OneHotEncoder, PowerTransformer, QuantileTransformer, 
-                                   MinMaxScaler, StandardScaler, RobustScaler, 
-                                   KBinsDiscretizer, LabelEncoder)
-from sklearn.model_selection import StratifiedKFold
-from sklearn.naive_bayes import GaussianNB
-from sklearn.linear_model import LogisticRegression
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.svm import SVC
-from sklearn.ensemble import RandomForestClassifier 
-from sklearn.neural_network import MLPClassifier
-from sklearn.exceptions import ConvergenceWarning
-from sklearn.metrics import confusion_matrix, roc_auc_score, matthews_corrcoef
-
-from imblearn.pipeline import Pipeline as ImbPipeline
-from imblearn.over_sampling import SMOTE, SMOTENC
-from imblearn.under_sampling import RandomUnderSampler
+from feature_engine.outliers import OutlierTrimmer, Winsorizer
 from imblearn import FunctionSampler
-from feature_engine.outliers import Winsorizer, OutlierTrimmer
+from imblearn.over_sampling import SMOTE, SMOTENC
+from imblearn.pipeline import Pipeline as ImbPipeline
+from imblearn.under_sampling import RandomUnderSampler
+
+from sklearn.base import BaseEstimator, TransformerMixin, clone
+from sklearn.compose import ColumnTransformer
+from sklearn.decomposition import PCA
+from sklearn.exceptions import ConvergenceWarning
+from sklearn.feature_selection import SelectPercentile, f_classif, mutual_info_classif
+from sklearn.metrics import confusion_matrix, matthews_corrcoef, roc_auc_score
+from sklearn.model_selection import StratifiedKFold
+from sklearn.preprocessing import (KBinsDiscretizer, LabelEncoder,
+                                   MinMaxScaler, OneHotEncoder,
+                                   PowerTransformer, QuantileTransformer,
+                                   StandardScaler)
+
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.naive_bayes import GaussianNB
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.svm import SVC
+from xgboost import XGBClassifier
+
+from functools import partial
 
 warnings.filterwarnings("ignore", category=ConvergenceWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -156,17 +165,22 @@ def build_pipeline(model_obj, prep_obj, num_cols, cat_cols):
     model_cloned = clone(model_obj)
     prep_cloned = prep_obj if isinstance(prep_obj, str) else clone(prep_obj)
 
-    transformers = []
     sampler = None
+    selector = None
     
     if isinstance(prep_cloned, (SMOTE, SMOTENC, RandomUnderSampler, FunctionSampler)):
         sampler = prep_cloned
         num_transformer = 'passthrough'
+        
+    elif isinstance(prep_cloned, SelectPercentile):
+        selector = prep_cloned
+        num_transformer = 'passthrough'
+        
     else:
         num_transformer = prep_cloned 
 
-    transformers.append(('num', num_transformer, num_cols))
-
+    transformers = [('num', num_transformer, num_cols)]
+    
     if cat_cols:
         cat_pipe = ImbPipeline([
             ('ohe', OneHotEncoder(handle_unknown='ignore', sparse_output=False, drop='if_binary'))
@@ -180,17 +194,22 @@ def build_pipeline(model_obj, prep_obj, num_cols, cat_cols):
     )
 
     steps = []
+    
     if sampler:
         steps.append(('sampler', sampler))
         
     steps.append(('preprocessor', preprocessor))
+    
+    if selector:
+        steps.append(('selector', selector))
+        
     steps.append(('classifier', model_cloned))
 
     return ImbPipeline(steps)
 
 def run_experiment(file_path, output_dir):
     dataset_name = os.path.basename(file_path).replace('.csv', '')
-    output_path = os.path.join(output_dir, f"{dataset_name}_results.csv")
+    output_path = os.path.join(output_dir, f"{dataset_name}_raw_results.csv")
 
     if os.path.exists(output_path):
         tqdm.write(f"File {os.path.basename(output_path)} already exists. Skipping...")
@@ -210,9 +229,10 @@ def run_experiment(file_path, output_dir):
         'GaussianNB': GaussianNB(),
         'LogisticRegression': LogisticRegression(random_state=42, max_iter=2000, n_jobs=1),
         'KNN': KNeighborsClassifier(n_jobs=1),
-        'SVM': SVC(random_state=42, max_iter=2000), 
+        'SVM': SVC(random_state=42),
         'RandomForest': RandomForestClassifier(random_state=42, n_jobs=1),
-        'MLP': MLPClassifier(random_state=42, max_iter=2000, early_stopping=True)
+        'MLP': MLPClassifier(random_state=42, max_iter=2000, early_stopping=True),
+        'XGBoost': XGBClassifier(random_state=42, n_jobs=1)
     }
 
     if len(cat_cols) > 0:
@@ -222,17 +242,22 @@ def run_experiment(file_path, output_dir):
 
     preprocessors = {
         'Baseline': 'passthrough',
+        
         'IQR Capping': OutlierCapper(capping_method='iqr', tail='both', fold=1.5),
-        'Quantile Capping': OutlierCapper(capping_method='quantiles', tail='both', fold=0.01),
         'IQR Removal': FunctionSampler(func=outlier_trimmer, kw_args={'method': 'iqr', 'fold': 1.5, 'cols': num_cols}, validate=False),
-        'Quantile Removal': FunctionSampler(func=outlier_trimmer, kw_args={'method': 'quantiles', 'fold': 0.01, 'cols': num_cols}, validate=False),
+        
+        'Standard Scaler': StandardScaler(),
+        'Min-Max Scaler': MinMaxScaler(),
+        
         'Yeo-Johnson': PowerTransformer(method='yeo-johnson'),
         'Quantile Transform': QuantileTransformer(output_distribution='normal', random_state=42),
-        'Min-Max Scaler': MinMaxScaler(),
-        'Standard Scaler': StandardScaler(),
-        'Robust Scaler': RobustScaler(),
+        
         'Uniform Binning': KBinsDiscretizer(n_bins=5, encode='ordinal', strategy='uniform'),
         'Quantile Binning': KBinsDiscretizer(n_bins=5, encode='ordinal', strategy='quantile', quantile_method='averaged_inverted_cdf'),
+        
+        'PCA': PCA(n_components=0.95, random_state=42),
+        'Select Percentile (Mutual Info)': SelectPercentile(score_func=partial(mutual_info_classif, random_state=42), percentile=50),
+        
         'Random Undersampling': RandomUnderSampler(random_state=42),
         'SMOTE / SMOTENC': smote_technique
     }
@@ -335,7 +360,7 @@ def run_experiment(file_path, output_dir):
 if __name__ == "__main__":
     SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
     INPUT_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, '../data/3 - interim'))
-    OUTPUT_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, '../data/4 - results'))
+    OUTPUT_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, '../data/4 - results/1 - raw'))
 
     ASK_TO_CONTINUE = True
     TIMEOUT_SECONDS = 10
