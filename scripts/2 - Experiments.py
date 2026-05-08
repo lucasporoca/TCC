@@ -27,8 +27,7 @@ from sklearn.feature_selection import SelectPercentile, f_classif, mutual_info_c
 from sklearn.metrics import confusion_matrix, matthews_corrcoef, roc_auc_score
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import (KBinsDiscretizer, LabelEncoder,
-                                   MinMaxScaler, OneHotEncoder,
-                                   PowerTransformer, QuantileTransformer,
+                                   MinMaxScaler, OneHotEncoder, PowerTransformer, QuantileTransformer,
                                    StandardScaler)
 
 from sklearn.ensemble import RandomForestClassifier
@@ -55,8 +54,9 @@ def ask_to_continue_with_timeout(timeout_seconds):
     while True:
         current_time = time.time()
         if current_time - last_beep_time >= 1:
-            winsound.Beep(1000, 300) 
+            winsound.Beep(1000, 300)
             last_beep_time = current_time
+            
         if msvcrt.kbhit():
             char = msvcrt.getch().decode('utf-8', 'ignore').lower()
             if char == 'y':
@@ -65,6 +65,7 @@ def ask_to_continue_with_timeout(timeout_seconds):
             elif char == 'n':
                 tqdm.write("Stopped.")
                 return False
+                
         if current_time - start_time > timeout_seconds:
             tqdm.write("Timeout. Continuing...")
             return True
@@ -99,17 +100,26 @@ def get_positive_scores(pipeline, X_data):
         return pipeline.decision_function(X_data)
 
 def outlier_trimmer(X, y, method, fold, cols):
-    valid_cols = []
-    for c in cols:
-        if c not in X.columns:
+    is_numpy = isinstance(X, np.ndarray)
+    
+    if is_numpy:
+        X_df = pd.DataFrame(X, columns=[str(i) for i in range(X.shape[1])])
+        search_cols = X_df.columns
+    else:
+        X_df = X
+        search_cols = cols
+
+    valid_cols =[]
+    for c in search_cols:
+        if c not in X_df.columns:
             continue
             
         if method == 'iqr':
-            q1, q3 = X[c].quantile([0.25, 0.75])
+            q1, q3 = X_df[c].quantile([0.25, 0.75])
             if q1 != q3:
                 valid_cols.append(c)
         elif method == 'quantiles':
-            q_low, q_high = X[c].quantile([fold, 1 - fold])
+            q_low, q_high = X_df[c].quantile([fold, 1 - fold])
             if q_low != q_high:
                 valid_cols.append(c)
                 
@@ -117,12 +127,19 @@ def outlier_trimmer(X, y, method, fold, cols):
         return X, y
 
     trimmer = OutlierTrimmer(capping_method=method, tail='both', fold=fold, variables=valid_cols)
-    X_res = trimmer.fit_transform(X)
-    
-    if len(X_res) <= len(X) * 0.80:
+    X_res_df = trimmer.fit_transform(X_df)
+
+    if len(X_res_df) <= len(X_df) * 0.80:
         return X, y
         
-    return X_res, y.loc[X_res.index]
+    if is_numpy:
+        if isinstance(y, np.ndarray):
+            y_res = y[X_res_df.index]
+        else:
+            y_res = y.iloc[X_res_df.index]
+        return X_res_df.values, y_res
+    else:
+        return X_res_df, y.loc[X_res_df.index]
 
 class OutlierCapper(BaseEstimator, TransformerMixin):
     def __init__(self, capping_method='iqr', tail='both', fold=1.5):
@@ -130,16 +147,22 @@ class OutlierCapper(BaseEstimator, TransformerMixin):
         self.tail = tail
         self.fold = fold
         self.capper_ = None
-        
+
     def fit(self, X, y=None):
-        valid_cols = []
-        for c in X.columns:
+        is_numpy = isinstance(X, np.ndarray)
+        if is_numpy:
+            X_df = pd.DataFrame(X, columns=[str(i) for i in range(X.shape[1])])
+        else:
+            X_df = X
+            
+        valid_cols =[]
+        for c in X_df.columns:
             if self.capping_method == 'iqr':
-                q1, q3 = X[c].quantile([0.25, 0.75])
+                q1, q3 = X_df[c].quantile([0.25, 0.75])
                 if q1 != q3:
                     valid_cols.append(c)
             elif self.capping_method == 'quantiles':
-                q_low, q_high = X[c].quantile([self.fold, 1 - self.fold])
+                q_low, q_high = X_df[c].quantile([self.fold, 1 - self.fold])
                 if q_low != q_high:
                     valid_cols.append(c)
                     
@@ -150,37 +173,45 @@ class OutlierCapper(BaseEstimator, TransformerMixin):
                 fold=self.fold, 
                 variables=valid_cols
             )
-            self.capper_.fit(X)
+            self.capper_.fit(X_df)
         else:
             self.capper_ = None
             
         return self
 
     def transform(self, X):
+        is_numpy = isinstance(X, np.ndarray)
+        if is_numpy:
+            X_df = pd.DataFrame(X, columns=[str(i) for i in range(X.shape[1])])
+        else:
+            X_df = X
+            
         if self.capper_ is not None:
-            return self.capper_.transform(X)
-        return X
+            res = self.capper_.transform(X_df)
+            return res.values if is_numpy else res
+            
+        return X_df.values if is_numpy else X_df
 
-def build_pipeline(model_obj, prep_obj, num_cols, cat_cols):
+def build_pipeline(model_obj, prep_obj, num_cols, cat_cols, scenario):
     model_cloned = clone(model_obj)
-    prep_cloned = prep_obj if isinstance(prep_obj, str) else clone(prep_obj)
+    transformers =[]
 
-    sampler = None
-    selector = None
-    
-    if isinstance(prep_cloned, (SMOTE, SMOTENC, RandomUnderSampler, FunctionSampler)):
-        sampler = prep_cloned
-        num_transformer = 'passthrough'
+    if num_cols:
+        num_steps =[]
         
-    elif isinstance(prep_cloned, SelectPercentile):
-        selector = prep_cloned
-        num_transformer = 'passthrough'
-        
-    else:
-        num_transformer = prep_cloned 
+        if scenario == 'scaled':
+            scaler = StandardScaler()
+            num_steps.append(('scaler', scaler))
 
-    transformers = [('num', num_transformer, num_cols)]
-    
+        if prep_obj is not None and not isinstance(prep_obj, (str, SMOTE, SMOTENC, RandomUnderSampler, FunctionSampler, SelectPercentile)):
+            num_steps.append(('custom_prep', clone(prep_obj)))
+
+        if num_steps:
+            num_transformer = ImbPipeline(steps=num_steps)
+            transformers.append(('num', num_transformer, num_cols))
+        else:
+            transformers.append(('num', 'passthrough', num_cols))
+
     if cat_cols:
         cat_pipe = ImbPipeline([
             ('ohe', OneHotEncoder(handle_unknown='ignore', sparse_output=False, drop='if_binary'))
@@ -193,23 +224,27 @@ def build_pipeline(model_obj, prep_obj, num_cols, cat_cols):
         verbose_feature_names_out=False
     )
 
-    steps = []
-    
-    if sampler:
-        steps.append(('sampler', sampler))
-        
-    steps.append(('preprocessor', preprocessor))
-    
-    if selector:
-        steps.append(('selector', selector))
+    steps =[]
+
+    if isinstance(prep_obj, (SMOTENC, RandomUnderSampler, FunctionSampler)):
+        steps.append(('sampler', prep_obj))
+        steps.append(('preprocessor', preprocessor))
+    elif isinstance(prep_obj, SMOTE):
+        steps.append(('preprocessor', preprocessor)) 
+        steps.append(('sampler', prep_obj))          
+    else:
+        steps.append(('preprocessor', preprocessor))
+
+    if isinstance(prep_obj, SelectPercentile):
+        steps.append(('selector', prep_obj))
         
     steps.append(('classifier', model_cloned))
 
     return ImbPipeline(steps)
 
-def run_experiment(file_path, output_dir):
+def run_experiment(file_path, output_dir, scenario):
     dataset_name = os.path.basename(file_path).replace('.csv', '')
-    output_path = os.path.join(output_dir, f"{dataset_name}_raw_results.csv")
+    output_path = os.path.join(output_dir, f"{dataset_name}_{scenario}_results.csv")
 
     if os.path.exists(output_path):
         tqdm.write(f"File {os.path.basename(output_path)} already exists. Skipping...")
@@ -219,19 +254,19 @@ def run_experiment(file_path, output_dir):
 
     X, y_raw = df.drop(columns=['target']), df['target']
     y = pd.Series(LabelEncoder().fit_transform(y_raw), index=X.index)
-    
-    num_cols = [c for c in X.columns if c.startswith('NUM')]
+
+    num_cols =[c for c in X.columns if c.startswith('NUM')]
     cat_cols = [c for c in X.columns if c.startswith('CAT')]
 
     cat_indices = [X.columns.get_loc(c) for c in cat_cols]
 
     models = {
         'GaussianNB': GaussianNB(),
-        'LogisticRegression': LogisticRegression(random_state=42, max_iter=2000, n_jobs=1),
+        'LogisticRegression': LogisticRegression(random_state=42, n_jobs=1),
         'KNN': KNeighborsClassifier(n_jobs=1),
-        'SVM': SVC(random_state=42),
+        'SVM': SVC(random_state=42), 
         'RandomForest': RandomForestClassifier(random_state=42, n_jobs=1),
-        'MLP': MLPClassifier(random_state=42, max_iter=2000, early_stopping=True),
+        'MLP': MLPClassifier(random_state=42),
         'XGBoost': XGBClassifier(random_state=42, n_jobs=1)
     }
 
@@ -242,29 +277,33 @@ def run_experiment(file_path, output_dir):
 
     preprocessors = {
         'Baseline': 'passthrough',
-        
         'IQR Capping': OutlierCapper(capping_method='iqr', tail='both', fold=1.5),
         'IQR Removal': FunctionSampler(func=outlier_trimmer, kw_args={'method': 'iqr', 'fold': 1.5, 'cols': num_cols}, validate=False),
-        
-        'Standard Scaler': StandardScaler(),
-        'Min-Max Scaler': MinMaxScaler(),
-        
-        'Yeo-Johnson': PowerTransformer(method='yeo-johnson'),
+        'Yeo-Johnson': PowerTransformer(method='yeo-johnson', standardize=False),
         'Quantile Transform': QuantileTransformer(output_distribution='normal', random_state=42),
-        
         'Uniform Binning': KBinsDiscretizer(n_bins=5, encode='ordinal', strategy='uniform'),
         'Quantile Binning': KBinsDiscretizer(n_bins=5, encode='ordinal', strategy='quantile', quantile_method='averaged_inverted_cdf'),
-        
         'PCA': PCA(n_components=0.95, random_state=42),
         'Select Percentile (Mutual Info)': SelectPercentile(score_func=partial(mutual_info_classif, random_state=42), percentile=50),
-        
         'Random Undersampling': RandomUnderSampler(random_state=42),
         'SMOTE / SMOTENC': smote_technique
     }
 
+    if scenario == 'raw':
+        raw_preprocessors = {
+            'Baseline': 'passthrough',
+            'Standard Scaler': StandardScaler(),
+            'MinMax Scaler': MinMaxScaler()
+        }
+
+        for k, v in preprocessors.items():
+            if k != 'Baseline':
+                raw_preprocessors[k] = v
+        preprocessors = raw_preprocessors
+
     cv = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
-    results = []
-    
+    results =[]
+
     pbar = tqdm(total=len(models) * len(preprocessors), desc=dataset_name, leave=False, position=1)
 
     for m_name, model_obj in models.items():
@@ -276,7 +315,7 @@ def run_experiment(file_path, output_dir):
                     X_test, y_test = X.iloc[test_idx], y.iloc[test_idx]
 
                     gc.collect() 
-                    pipeline = build_pipeline(model_obj, prep_obj, num_cols, cat_cols)
+                    pipeline = build_pipeline(model_obj, prep_obj, num_cols, cat_cols, scenario)
 
                     tracemalloc.start()
                     tracemalloc.clear_traces()
@@ -288,13 +327,6 @@ def run_experiment(file_path, output_dir):
                     
                     _, py_peak_mem = tracemalloc.get_traced_memory()
                     tracemalloc.stop()
-                    
-                    clf = pipeline.named_steps['classifier']
-                    if hasattr(clf, 'n_iter_'):
-                        val = clf.n_iter_
-                        iters = val.max() if isinstance(val, np.ndarray) else val
-                    else:
-                        iters = np.nan
                         
                     disk_size = len(pickle.dumps(pipeline)) / (1024 * 1024)
 
@@ -318,8 +350,7 @@ def run_experiment(file_path, output_dir):
                     row = {
                         'Dataset': dataset_name, 'Model': m_name, 'Preprocessor': p_name, 'Fold': fold_idx,
                         'Fit_Time_sec': fit_time, 'Predict_Time_Test_sec': pred_time_test,
-                        'Peak_Memory_MB': py_peak_mem / (1024 * 1024), 
-                        'Pipeline_Disk_Size_MB': disk_size, 'Iterations': iters, 
+                        'Peak_Memory_MB': py_peak_mem / (1024 * 1024), 'Pipeline_Disk_Size_MB': disk_size,
                         'Optimal_Threshold': best_thresh,
                         
                         'Train_TP': tp_tr, 'Train_TN': tn_tr, 'Train_FP': fp_tr, 'Train_FN': fn_tr, 
@@ -336,8 +367,7 @@ def run_experiment(file_path, output_dir):
                 err_row = {
                     'Dataset': dataset_name, 'Model': m_name, 'Preprocessor': p_name, 'Fold': np.nan,
                     'Fit_Time_sec': np.nan, 'Predict_Time_Test_sec': np.nan,
-                    'Peak_Memory_MB': np.nan,'Pipeline_Disk_Size_MB': np.nan, 'Iterations': np.nan,
-                    'Optimal_Threshold': np.nan,
+                    'Peak_Memory_MB': np.nan,'Pipeline_Disk_Size_MB': np.nan, 'Optimal_Threshold': np.nan,
                     
                     'Train_TP': np.nan, 'Train_TN': np.nan, 'Train_FP': np.nan, 'Train_FN': np.nan, 
                     'Train_ROC_AUC': np.nan, 'Train_MCC': np.nan,
@@ -358,23 +388,28 @@ def run_experiment(file_path, output_dir):
     return True 
 
 if __name__ == "__main__":
-    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-    INPUT_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, '../data/3 - interim'))
-    OUTPUT_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, '../data/4 - results/1 - raw'))
-
+    SCENARIO = "scaled" 
     ASK_TO_CONTINUE = True
     TIMEOUT_SECONDS = 10
+    
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    INPUT_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, '../data/3 - interim'))
+    
+    if SCENARIO == "raw":
+        OUTPUT_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, '../data/4 - results/1 - raw'))
+    elif SCENARIO == "scaled":
+        OUTPUT_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, '../data/4 - results/2 - scaled'))
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    csv_files = [f for f in os.listdir(INPUT_DIR) if f.endswith('.csv')]
+    csv_files =[f for f in os.listdir(INPUT_DIR) if f.endswith('.csv')]
 
-    pbar_overall = tqdm(total=len(csv_files), desc="Overall", position=0, leave=True)
+    pbar_overall = tqdm(total=len(csv_files), desc=f"Overall ({SCENARIO.upper()})", position=0, leave=True)
 
     for i, file in enumerate(csv_files):
         full_path = os.path.join(INPUT_DIR, file)
         
-        exec_status = run_experiment(full_path, OUTPUT_DIR)
+        exec_status = run_experiment(full_path, OUTPUT_DIR, SCENARIO)
         
         pbar_overall.update(1)
         
