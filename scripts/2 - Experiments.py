@@ -2,93 +2,159 @@ import gc
 import os
 import pickle
 import time
+import random
 import traceback
 import tracemalloc
 import warnings
-
-import msvcrt
-import winsound
+from functools import partial
 
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
 from tqdm.auto import tqdm
+
+import sklearn
+sklearn.set_config(transform_output="pandas")
 
 from feature_engine.outliers import OutlierTrimmer, Winsorizer
 from imblearn import FunctionSampler
-from imblearn.over_sampling import SMOTE, SMOTENC
+from imblearn.over_sampling import SMOTE
 from imblearn.pipeline import Pipeline as ImbPipeline
 from imblearn.under_sampling import RandomUnderSampler
 
 from sklearn.base import BaseEstimator, TransformerMixin, clone
-from sklearn.compose import ColumnTransformer
+from sklearn.compose import ColumnTransformer, make_column_selector
 from sklearn.decomposition import PCA
-from sklearn.exceptions import ConvergenceWarning
-from sklearn.feature_selection import SelectPercentile, f_classif, mutual_info_classif
-from sklearn.metrics import confusion_matrix, matthews_corrcoef, roc_auc_score
-from sklearn.model_selection import StratifiedKFold
-from sklearn.preprocessing import (KBinsDiscretizer, LabelEncoder,
-                                   MinMaxScaler, OneHotEncoder, PowerTransformer, QuantileTransformer,
-                                   StandardScaler)
-
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.exceptions import ConvergenceWarning
+from sklearn.feature_selection import SelectPercentile, mutual_info_classif
+from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (confusion_matrix, matthews_corrcoef,
+                             roc_auc_score, average_precision_score)
+from sklearn.model_selection import StratifiedKFold
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import (KBinsDiscretizer, LabelEncoder, MinMaxScaler,
+                                   PowerTransformer, QuantileTransformer,
+                                   StandardScaler, TargetEncoder)
 from sklearn.svm import SVC
 from xgboost import XGBClassifier
 
-from functools import partial
+warnings.filterwarnings("ignore")
 
-warnings.filterwarnings("ignore", category=ConvergenceWarning)
-warnings.filterwarnings("ignore", category=UserWarning)
+random.seed(42)
+np.random.seed(42)
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
-def ask_to_continue_with_timeout(timeout_seconds):
-    tqdm.write(f"\nDone. Press 'y' to continue, 'n' to stop, or wait {timeout_seconds}s...")
-    start_time = time.time()
-    last_beep_time = 0
-    while True:
-        current_time = time.time()
-        if current_time - last_beep_time >= 1:
-            winsound.Beep(1000, 300)
-            last_beep_time = current_time
-            
-        if msvcrt.kbhit():
-            char = msvcrt.getch().decode('utf-8', 'ignore').lower()
-            if char == 'y':
-                tqdm.write("Continuing...")
-                return True
-            elif char == 'n':
-                tqdm.write("Stopped.")
-                return False
-                
-        if current_time - start_time > timeout_seconds:
-            tqdm.write("Timeout. Continuing...")
-            return True
-        time.sleep(0.1)
 
-def optimize_threshold_mcc(y_true, y_scores):
-    thresholds = np.unique(np.percentile(y_scores, np.linspace(1, 99, 99)))
-    
-    if len(thresholds) == 0:
-        return 0.5, matthews_corrcoef(y_true, (y_scores >= 0.5).astype(int))
+class DropHighMissingFeatures(BaseEstimator, TransformerMixin):
+    def __init__(self, threshold=0.5):
+        self.threshold = threshold
+        self.cols_to_keep_ = None
 
-    best_thresh = thresholds[len(thresholds) // 2]
-    best_mcc = -1.0
-    
-    for t in thresholds:
-        y_pred_t = (y_scores >= t).astype(int)
-        mcc = matthews_corrcoef(y_true, y_pred_t)
-        
-        if mcc > best_mcc:
-            best_mcc = mcc
-            best_thresh = t
-                    
-    return best_thresh, best_mcc
+    def fit(self, X, y=None):
+        X_df = X if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
+        self.cols_to_keep_ = X_df.columns[X_df.isnull().mean() <= self.threshold].tolist()
+        return self
+
+    def transform(self, X):
+        X_df = X.copy() if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
+        for col in self.cols_to_keep_:
+            if col not in X_df.columns:
+                X_df[col] = np.nan
+        return X_df[self.cols_to_keep_]
+
+
+class OutlierCapper(BaseEstimator, TransformerMixin):
+    def __init__(self, tail='both', fold=1.5):
+        self.tail = tail
+        self.fold = fold
+        self.capper_ = None
+
+    def fit(self, X, y=None):
+        X_df = X if isinstance(X, pd.DataFrame) else pd.DataFrame(X, columns=[str(i) for i in range(X.shape[1])])
+        valid_cols = []
+        for c in X_df.columns:
+            q1, q3 = X_df[c].quantile([0.25, 0.75])
+            if q1 != q3:
+                valid_cols.append(c)
+        if valid_cols:
+            self.capper_ = Winsorizer(
+                capping_method='iqr',
+                tail=self.tail,
+                fold=self.fold,
+                variables=valid_cols
+            )
+            self.capper_.fit(X_df)
+        else:
+            self.capper_ = None
+        return self
+
+    def transform(self, X):
+        X_df = X if isinstance(X, pd.DataFrame) else pd.DataFrame(X, columns=[str(i) for i in range(X.shape[1])])
+        if self.capper_ is not None:
+            return self.capper_.transform(X_df)
+        return X_df
+
+
+class FiniteCapper(BaseEstimator, TransformerMixin):
+    _FLOAT32_SAFE = float(np.finfo(np.float32).max) * 0.99
+
+    def fit(self, X, y=None):
+        X_arr = X.to_numpy() if isinstance(X, pd.DataFrame) else np.array(X)
+        self.max_finite_ = np.zeros(X_arr.shape[1])
+        self.min_finite_ = np.zeros(X_arr.shape[1])
+        for i in range(X_arr.shape[1]):
+            col_data = X_arr[:, i]
+            finite_mask = np.isfinite(col_data)
+            if finite_mask.any():
+                self.max_finite_[i] = np.clip(np.max(col_data[finite_mask]), -self._FLOAT32_SAFE, self._FLOAT32_SAFE)
+                self.min_finite_[i] = np.clip(np.min(col_data[finite_mask]), -self._FLOAT32_SAFE, self._FLOAT32_SAFE)
+            else:
+                self.max_finite_[i] = 0.0
+                self.min_finite_[i] = 0.0
+        return self
+
+    def transform(self, X):
+        is_df = isinstance(X, pd.DataFrame)
+        X_arr = X.copy().to_numpy() if is_df else np.copy(X)
+        for i in range(X_arr.shape[1]):
+            X_arr[:, i] = np.where(np.isposinf(X_arr[:, i]), self.max_finite_[i], X_arr[:, i])
+            X_arr[:, i] = np.where(np.isneginf(X_arr[:, i]), self.min_finite_[i], X_arr[:, i])
+            X_arr[:, i] = np.nan_to_num(X_arr[:, i], nan=0.0, posinf=self.max_finite_[i], neginf=self.min_finite_[i])
+        X_arr = np.clip(X_arr, -self._FLOAT32_SAFE, self._FLOAT32_SAFE)
+        if is_df:
+            return pd.DataFrame(X_arr, columns=X.columns, index=X.index)
+        return X_arr
+
+
+def outlier_trimmer(X, y, fold=1.5, min_samples=20):
+    is_numpy = isinstance(X, np.ndarray)
+    X_df = pd.DataFrame(X) if is_numpy else X
+    if is_numpy and hasattr(y, 'index'):
+        X_df.index = y.index
+    valid_cols = []
+    for c in X_df.columns:
+        q1, q3 = X_df[c].quantile([0.25, 0.75])
+        if q1 != q3:
+            valid_cols.append(c)
+    if not valid_cols:
+        return X, y
+    trimmer = OutlierTrimmer(capping_method='iqr', tail='both', fold=fold, variables=valid_cols)
+    X_res_df = trimmer.fit_transform(X_df)
+    if len(X_res_df) < min_samples:
+        return X, y
+    y_res = y.loc[X_res_df.index] if hasattr(y, 'loc') else y[X_res_df.index]
+    if is_numpy:
+        return X_res_df.values, y_res.values if isinstance(y_res, pd.Series) else y_res
+    else:
+        return X_res_df, y_res
+
 
 def get_positive_scores(pipeline, X_data):
     if hasattr(pipeline, "predict_proba"):
@@ -99,329 +165,279 @@ def get_positive_scores(pipeline, X_data):
     else:
         return pipeline.decision_function(X_data)
 
-def outlier_trimmer(X, y, method, fold, cols):
-    is_numpy = isinstance(X, np.ndarray)
-    
-    if is_numpy:
-        X_df = pd.DataFrame(X, columns=[str(i) for i in range(X.shape[1])])
-        search_cols = X_df.columns
-    else:
-        X_df = X
-        search_cols = cols
 
-    valid_cols =[]
-    for c in search_cols:
-        if c not in X_df.columns:
-            continue
-            
-        if method == 'iqr':
-            q1, q3 = X_df[c].quantile([0.25, 0.75])
-            if q1 != q3:
-                valid_cols.append(c)
-        elif method == 'quantiles':
-            q_low, q_high = X_df[c].quantile([fold, 1 - fold])
-            if q_low != q_high:
-                valid_cols.append(c)
-                
-    if not valid_cols:
-        return X, y
-
-    trimmer = OutlierTrimmer(capping_method=method, tail='both', fold=fold, variables=valid_cols)
-    X_res_df = trimmer.fit_transform(X_df)
-
-    if len(X_res_df) <= len(X_df) * 0.80:
-        return X, y
-        
-    if is_numpy:
-        if isinstance(y, np.ndarray):
-            y_res = y[X_res_df.index]
-        else:
-            y_res = y.iloc[X_res_df.index]
-        return X_res_df.values, y_res
-    else:
-        return X_res_df, y.loc[X_res_df.index]
-
-class OutlierCapper(BaseEstimator, TransformerMixin):
-    def __init__(self, capping_method='iqr', tail='both', fold=1.5):
-        self.capping_method = capping_method
-        self.tail = tail
-        self.fold = fold
-        self.capper_ = None
-
-    def fit(self, X, y=None):
-        is_numpy = isinstance(X, np.ndarray)
-        if is_numpy:
-            X_df = pd.DataFrame(X, columns=[str(i) for i in range(X.shape[1])])
-        else:
-            X_df = X
-            
-        valid_cols =[]
-        for c in X_df.columns:
-            if self.capping_method == 'iqr':
-                q1, q3 = X_df[c].quantile([0.25, 0.75])
-                if q1 != q3:
-                    valid_cols.append(c)
-            elif self.capping_method == 'quantiles':
-                q_low, q_high = X_df[c].quantile([self.fold, 1 - self.fold])
-                if q_low != q_high:
-                    valid_cols.append(c)
-                    
-        if valid_cols:
-            self.capper_ = Winsorizer(
-                capping_method=self.capping_method, 
-                tail=self.tail, 
-                fold=self.fold, 
-                variables=valid_cols
-            )
-            self.capper_.fit(X_df)
-        else:
-            self.capper_ = None
-            
-        return self
-
-    def transform(self, X):
-        is_numpy = isinstance(X, np.ndarray)
-        if is_numpy:
-            X_df = pd.DataFrame(X, columns=[str(i) for i in range(X.shape[1])])
-        else:
-            X_df = X
-            
-        if self.capper_ is not None:
-            res = self.capper_.transform(X_df)
-            return res.values if is_numpy else res
-            
-        return X_df.values if is_numpy else X_df
-
-def build_pipeline(model_obj, prep_obj, num_cols, cat_cols, scenario):
+def build_pipeline(model_obj, feature_prep, global_prep):
     model_cloned = clone(model_obj)
-    transformers =[]
+    step_drop_nan = DropHighMissingFeatures(threshold=0.5)
+    num_selector = make_column_selector(pattern='^NUM_')
+    cat_selector = make_column_selector(pattern='^CAT_')
 
-    if num_cols:
-        num_steps =[]
-        
-        if scenario == 'scaled':
-            scaler = StandardScaler()
-            num_steps.append(('scaler', scaler))
-
-        if prep_obj is not None and not isinstance(prep_obj, (str, SMOTE, SMOTENC, RandomUnderSampler, FunctionSampler, SelectPercentile)):
-            num_steps.append(('custom_prep', clone(prep_obj)))
-
-        if num_steps:
-            num_transformer = ImbPipeline(steps=num_steps)
-            transformers.append(('num', num_transformer, num_cols))
-        else:
-            transformers.append(('num', 'passthrough', num_cols))
-
-    if cat_cols:
-        cat_pipe = ImbPipeline([
-            ('ohe', OneHotEncoder(handle_unknown='ignore', sparse_output=False, drop='if_binary'))
-        ])
-        transformers.append(('cat', cat_pipe, cat_cols))
-
-    preprocessor = ColumnTransformer(
-        transformers=transformers,
-        remainder='drop',
+    num_pipeline = ImbPipeline([
+        ('imputer', SimpleImputer(strategy='median'))
+    ])
+    cat_pipeline = ImbPipeline([
+        ('imputer', SimpleImputer(strategy='constant', fill_value='missing_value')),
+        ('te', TargetEncoder(target_type='binary', cv=5, random_state=42))
+    ])
+    impute_and_encode = ColumnTransformer(
+        transformers=[
+            ('num', num_pipeline, num_selector),
+            ('cat', cat_pipeline, cat_selector)
+        ],
+        remainder='passthrough',
         verbose_feature_names_out=False
     )
 
-    steps =[]
+    steps = [
+        ('drop_nans', step_drop_nan),
+        ('impute_and_encode', impute_and_encode)
+    ]
 
-    if isinstance(prep_obj, (SMOTENC, RandomUnderSampler, FunctionSampler)):
-        steps.append(('sampler', prep_obj))
-        steps.append(('preprocessor', preprocessor))
-    elif isinstance(prep_obj, SMOTE):
-        steps.append(('preprocessor', preprocessor)) 
-        steps.append(('sampler', prep_obj))          
-    else:
-        steps.append(('preprocessor', preprocessor))
+    if feature_prep is not None:
+        if isinstance(feature_prep, list):
+            for name, step in feature_prep:
+                steps.append((name, clone(step)))
+        else:
+            steps.append(('feature_prep', clone(feature_prep)))
 
-    if isinstance(prep_obj, SelectPercentile):
-        steps.append(('selector', prep_obj))
-        
+    if global_prep is not None:
+        if isinstance(global_prep, list):
+            for name, step in global_prep:
+                steps.append((name, clone(step)))
+        else:
+            steps.append(('global_prep', clone(global_prep)))
+
+    steps.append(('fix_infs', FiniteCapper()))
     steps.append(('classifier', model_cloned))
 
     return ImbPipeline(steps)
 
-def run_experiment(file_path, output_dir, scenario):
+
+def run_single_fold(fold_idx, train_idx, test_idx,
+                    X, y, dataset_name,
+                    m_name, model_obj,
+                    p_name, feature_prep, global_prep,
+                    models_with_convergence):
+    
+    np.random.seed(42 + fold_idx)
+    random.seed(42 + fold_idx)
+    
+    try:
+        X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
+        X_test,  y_test  = X.iloc[test_idx],  y.iloc[test_idx]
+
+        pipeline = build_pipeline(model_obj, feature_prep, global_prep)
+
+        model_converged = True if m_name in models_with_convergence else np.nan
+
+        measure_resources = (fold_idx == 1)
+        if measure_resources:
+            tracemalloc.start()
+
+        t0_fit = time.perf_counter()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ConvergenceWarning)
+            pipeline.fit(X_train, y_train)
+            for w in caught:
+                if issubclass(w.category, ConvergenceWarning):
+                    if m_name in models_with_convergence:
+                        model_converged = False
+        fit_time = time.perf_counter() - t0_fit
+
+        if measure_resources:
+            _, peak_mem = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+            ram_used_mb = peak_mem / (1024 * 1024)
+            disk_size   = len(pickle.dumps(pipeline)) / (1024 * 1024)
+        else:
+            ram_used_mb = np.nan
+            disk_size   = np.nan
+
+        y_train_scores = get_positive_scores(pipeline, X_train)
+        y_train_pred = (y_train_scores >= 0.5).astype(int) if hasattr(pipeline, "predict_proba") else (y_train_scores >= 0).astype(int)
+
+        tn_tr, fp_tr, fn_tr, tp_tr = confusion_matrix(y_train, y_train_pred, labels=[0, 1]).ravel()
+        roc_tr    = roc_auc_score(y_train, y_train_scores)
+        pr_auc_tr = average_precision_score(y_train, y_train_scores)
+        mcc_tr    = matthews_corrcoef(y_train, y_train_pred)
+
+        t0_pred_test = time.perf_counter()
+        y_test_scores = get_positive_scores(pipeline, X_test)
+        y_test_pred = (y_test_scores >= 0.5).astype(int) if hasattr(pipeline, "predict_proba") else (y_test_scores >= 0).astype(int)
+        pred_time_test = time.perf_counter() - t0_pred_test
+
+        tn_te, fp_te, fn_te, tp_te = confusion_matrix(y_test, y_test_pred, labels=[0, 1]).ravel()
+        roc_te    = roc_auc_score(y_test, y_test_scores)
+        pr_auc_te = average_precision_score(y_test, y_test_scores)
+        mcc_te    = matthews_corrcoef(y_test, y_test_pred)
+
+        return {
+            'Dataset': dataset_name, 'Model': m_name, 'Preprocessor': p_name, 'Fold': fold_idx,
+            'Converged': model_converged, 'Fit_Time_sec': fit_time, 'Predict_Time_Test_sec': pred_time_test,
+            'Peak_Memory_MB': ram_used_mb, 'Pipeline_Disk_Size_MB': disk_size,
+            'Train_TP': tp_tr, 'Train_TN': tn_tr, 'Train_FP': fp_tr, 'Train_FN': fn_tr,
+            'Train_ROC_AUC': roc_tr, 'Train_PR_AUC': pr_auc_tr, 'Train_MCC': mcc_tr,
+            'Test_TP': tp_te, 'Test_TN': tn_te, 'Test_FP': fp_te, 'Test_FN': fn_te,
+            'Test_ROC_AUC': roc_te, 'Test_PR_AUC': pr_auc_te, 'Test_MCC': mcc_te,
+            'Error_Log': None
+        }
+
+    except Exception:
+        return {
+            'Dataset': dataset_name, 'Model': m_name, 'Preprocessor': p_name, 'Fold': fold_idx,
+            'Converged': np.nan,'Fit_Time_sec': np.nan, 'Predict_Time_Test_sec': np.nan,
+            'Peak_Memory_MB': np.nan, 'Pipeline_Disk_Size_MB': np.nan,
+            'Train_TP': np.nan, 'Train_TN': np.nan, 'Train_FP': np.nan, 'Train_FN': np.nan,
+            'Train_ROC_AUC': np.nan, 'Train_PR_AUC': np.nan, 'Train_MCC': np.nan,
+            'Test_TP': np.nan, 'Test_TN': np.nan, 'Test_FP': np.nan, 'Test_FN': np.nan,
+            'Test_ROC_AUC': np.nan, 'Test_PR_AUC': np.nan, 'Test_MCC': np.nan,
+            'Error_Log': traceback.format_exc()
+        }
+
+
+def run_experiment(file_path, output_dir, n_jobs=-1):
     dataset_name = os.path.basename(file_path).replace('.csv', '')
-    output_path = os.path.join(output_dir, f"{dataset_name}_{scenario}_results.csv")
+    output_path  = os.path.join(output_dir, f"{dataset_name}_results.csv")
 
     if os.path.exists(output_path):
         tqdm.write(f"File {os.path.basename(output_path)} already exists. Skipping...")
         return False
 
     df = pd.read_csv(file_path)
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+    cat_cols = [c for c in df.columns if c.startswith('CAT_')]
+    for col in cat_cols:
+        df[col] = df[col].astype(str).replace('nan', 'missing_value')
 
     X, y_raw = df.drop(columns=['target']), df['target']
-    y = pd.Series(LabelEncoder().fit_transform(y_raw), index=X.index)
 
-    num_cols =[c for c in X.columns if c.startswith('NUM')]
-    cat_cols = [c for c in X.columns if c.startswith('CAT')]
-
-    cat_indices = [X.columns.get_loc(c) for c in cat_cols]
+    class_counts = y_raw.value_counts()
+    minority_class = class_counts.idxmin()
+    
+    y = (y_raw == minority_class).astype(int)
+    y.index = X.index
 
     models = {
-        'GaussianNB': GaussianNB(),
-        'LogisticRegression': LogisticRegression(random_state=42, n_jobs=1),
-        'KNN': KNeighborsClassifier(n_jobs=1),
-        'SVM': SVC(random_state=42), 
-        'RandomForest': RandomForestClassifier(random_state=42, n_jobs=1),
-        'MLP': MLPClassifier(random_state=42),
-        'XGBoost': XGBClassifier(random_state=42, n_jobs=1)
+        'GaussianNB':         GaussianNB(),
+        'LogisticRegression': LogisticRegression(random_state=42, max_iter=1000, n_jobs=1),
+        'KNN':                KNeighborsClassifier(n_jobs=1),
+        'SVM':                SVC(random_state=42, max_iter=1000),
+        'RandomForest':       RandomForestClassifier(random_state=42, n_jobs=1),
+        'MLP':                MLPClassifier(random_state=42, max_iter=1000),
+        'XGBoost':            XGBClassifier(random_state=42, eval_metric='logloss', n_jobs=1)
     }
 
-    if len(cat_cols) > 0:
-        smote_technique = SMOTENC(categorical_features=cat_indices, random_state=42)
-    else:
-        smote_technique = SMOTE(random_state=42)
+    models_with_convergence = ['LogisticRegression', 'SVM', 'MLP']
 
-    preprocessors = {
-        'Baseline': 'passthrough',
-        'IQR Capping': OutlierCapper(capping_method='iqr', tail='both', fold=1.5),
-        'IQR Removal': FunctionSampler(func=outlier_trimmer, kw_args={'method': 'iqr', 'fold': 1.5, 'cols': num_cols}, validate=False),
-        'Yeo-Johnson': PowerTransformer(method='yeo-johnson', standardize=False),
-        'Quantile Transform': QuantileTransformer(output_distribution='normal', random_state=42),
-        'Uniform Binning': KBinsDiscretizer(n_bins=5, encode='ordinal', strategy='uniform'),
-        'Quantile Binning': KBinsDiscretizer(n_bins=5, encode='ordinal', strategy='quantile', quantile_method='averaged_inverted_cdf'),
-        'PCA': PCA(n_components=0.95, random_state=42),
-        'Select Percentile (Mutual Info)': SelectPercentile(score_func=partial(mutual_info_classif, random_state=42), percentile=50),
-        'Random Undersampling': RandomUnderSampler(random_state=42),
-        'SMOTE / SMOTENC': smote_technique
+    preprocessors_dict = {
+        'Baseline':           (None, None),
+        'Standard Scaling':   (None, StandardScaler()),
+        'MinMax Scaling':     (None, MinMaxScaler()),
+        'IQR Capping':           (OutlierCapper(tail='both', fold=1.5), None),
+        'IQR Capping + Scaling': (OutlierCapper(tail='both', fold=1.5), StandardScaler()),
+        'IQR Removal': (None, FunctionSampler(func=outlier_trimmer, kw_args={'fold': 1.5}, validate=False)),
+        'IQR Removal + Scaling': (None, [
+            ('trimmer', FunctionSampler(func=outlier_trimmer, kw_args={'fold': 1.5}, validate=False)),
+            ('scaler',  StandardScaler())
+        ]),
+        'Yeo-Johnson':           (PowerTransformer(method='yeo-johnson', standardize=False), None),
+        'Yeo-Johnson + Scaling': (PowerTransformer(method='yeo-johnson', standardize=False), StandardScaler()),
+        'Quantile Transform':           (QuantileTransformer(output_distribution='normal', random_state=42), None),
+        'Quantile Transform + Scaling': (QuantileTransformer(output_distribution='normal', random_state=42), StandardScaler()),
+        'Uniform Binning':           (KBinsDiscretizer(n_bins=5, encode='ordinal', strategy='uniform'), None),
+        'Uniform Binning + Scaling': (KBinsDiscretizer(n_bins=5, encode='ordinal', strategy='uniform'), StandardScaler()),
+        'Quantile Binning':           (KBinsDiscretizer(n_bins=5, encode='ordinal', strategy='quantile', quantile_method='averaged_inverted_cdf'), None),
+        'Quantile Binning + Scaling': (KBinsDiscretizer(n_bins=5, encode='ordinal', strategy='quantile', quantile_method='averaged_inverted_cdf'), StandardScaler()),
+        'PCA': (None, PCA(n_components=0.95, random_state=42, whiten=False)),
+        'PCA + Scaling': (None, [
+            ('scaler_pre',  StandardScaler()),
+            ('pca',         PCA(n_components=0.95, random_state=42, whiten=False)),
+            ('scaler_post', StandardScaler())
+        ]),
+        'SMOTE':           (None, SMOTE(random_state=42)),
+        'SMOTE + Scaling': (None, [
+            ('scaler', StandardScaler()),
+            ('smote',  SMOTE(random_state=42))
+        ]),
+        'Select Percentile (MI)': (None, SelectPercentile(
+            score_func=partial(mutual_info_classif, random_state=42), percentile=50
+        )),
+        'Select Percentile (MI) + Scaling': (None, [
+            ('select', SelectPercentile(score_func=partial(mutual_info_classif, random_state=42), percentile=50)),
+            ('scaler', StandardScaler())
+        ]),
+        'Random Undersampling':           (None, RandomUnderSampler(random_state=42)),
+        'Random Undersampling + Scaling': (None, [
+            ('rus',    RandomUnderSampler(random_state=42)),
+            ('scaler', StandardScaler())
+        ])
     }
 
-    if scenario == 'raw':
-        raw_preprocessors = {
-            'Baseline': 'passthrough',
-            'Standard Scaler': StandardScaler(),
-            'MinMax Scaler': MinMaxScaler()
-        }
+    cv      = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
+    results = []
 
-        for k, v in preprocessors.items():
-            if k != 'Baseline':
-                raw_preprocessors[k] = v
-        preprocessors = raw_preprocessors
-
-    cv = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
-    results =[]
-
-    pbar = tqdm(total=len(models) * len(preprocessors), desc=dataset_name, leave=False, position=1)
+    pbar = tqdm(
+        total=len(models) * len(preprocessors_dict),
+        desc=dataset_name, leave=False, position=1
+    )
 
     for m_name, model_obj in models.items():
-        for p_name, prep_obj in preprocessors.items():
+        for p_name, (feature_prep, global_prep) in preprocessors_dict.items():
             
-            try:
-                for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X, y), start=1):
-                    X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
-                    X_test, y_test = X.iloc[test_idx], y.iloc[test_idx]
+            gc.collect()
 
-                    gc.collect() 
-                    pipeline = build_pipeline(model_obj, prep_obj, num_cols, cat_cols, scenario)
+            folds = list(enumerate(cv.split(X, y), start=1))
 
-                    tracemalloc.start()
-                    tracemalloc.clear_traces()
-                    tracemalloc.reset_peak()
-                    
-                    t0_fit = time.process_time()
-                    pipeline.fit(X_train, y_train)
-                    fit_time = time.process_time() - t0_fit
-                    
-                    _, py_peak_mem = tracemalloc.get_traced_memory()
-                    tracemalloc.stop()
-                        
-                    disk_size = len(pickle.dumps(pipeline)) / (1024 * 1024)
+            fold_isolated = Parallel(n_jobs=1, backend='sequential')(
+                delayed(run_single_fold)(
+                    fold_idx, train_idx, test_idx,
+                    X, y, dataset_name,
+                    m_name, model_obj,
+                    p_name, feature_prep, global_prep,
+                    models_with_convergence
+                )
+                for fold_idx, (train_idx, test_idx) in folds[:1]
+            )
 
-                    y_train_scores = get_positive_scores(pipeline, X_train)
-                    best_thresh, mcc_tr = optimize_threshold_mcc(y_train, y_train_scores)
-                    
-                    y_train_pred_opt = (y_train_scores >= best_thresh).astype(int)
-                    tn_tr, fp_tr, fn_tr, tp_tr = confusion_matrix(y_train, y_train_pred_opt, labels=[0, 1]).ravel()
-                    roc_tr = roc_auc_score(y_train, y_train_scores)
+            if len(folds) > 1:
+                fold_rest = Parallel(n_jobs=n_jobs, backend='loky')(
+                    delayed(run_single_fold)(
+                        fold_idx, train_idx, test_idx,
+                        X, y, dataset_name,
+                        m_name, model_obj,
+                        p_name, feature_prep, global_prep,
+                        models_with_convergence
+                    )
+                    for fold_idx, (train_idx, test_idx) in folds[1:]
+                )
+            else:
+                fold_rest = []
 
-                    t0_pred_test = time.process_time()
-                    y_test_scores = get_positive_scores(pipeline, X_test)
-                    pred_time_test = time.process_time() - t0_pred_test
-                    
-                    y_test_pred_opt = (y_test_scores >= best_thresh).astype(int)
-                    mcc_te = matthews_corrcoef(y_test, y_test_pred_opt)
-                    
-                    tn_te, fp_te, fn_te, tp_te = confusion_matrix(y_test, y_test_pred_opt, labels=[0, 1]).ravel()
-                    roc_te = roc_auc_score(y_test, y_test_scores)
+            results.extend(fold_isolated + fold_rest)
+            pbar.update(1)
 
-                    row = {
-                        'Dataset': dataset_name, 'Model': m_name, 'Preprocessor': p_name, 'Fold': fold_idx,
-                        'Fit_Time_sec': fit_time, 'Predict_Time_Test_sec': pred_time_test,
-                        'Peak_Memory_MB': py_peak_mem / (1024 * 1024), 'Pipeline_Disk_Size_MB': disk_size,
-                        'Optimal_Threshold': best_thresh,
-                        
-                        'Train_TP': tp_tr, 'Train_TN': tn_tr, 'Train_FP': fp_tr, 'Train_FN': fn_tr, 
-                        'Train_ROC_AUC': roc_tr, 'Train_MCC': mcc_tr,
-                        
-                        'Test_TP': tp_te, 'Test_TN': tn_te, 'Test_FP': fp_te, 'Test_FN': fn_te, 
-                        'Test_ROC_AUC': roc_te, 'Test_MCC': mcc_te,
-                        
-                        'Error_Log': None
-                    }
-                    results.append(row)
-
-            except Exception as e:
-                err_row = {
-                    'Dataset': dataset_name, 'Model': m_name, 'Preprocessor': p_name, 'Fold': np.nan,
-                    'Fit_Time_sec': np.nan, 'Predict_Time_Test_sec': np.nan,
-                    'Peak_Memory_MB': np.nan,'Pipeline_Disk_Size_MB': np.nan, 'Optimal_Threshold': np.nan,
-                    
-                    'Train_TP': np.nan, 'Train_TN': np.nan, 'Train_FP': np.nan, 'Train_FN': np.nan, 
-                    'Train_ROC_AUC': np.nan, 'Train_MCC': np.nan,
-                    
-                    'Test_TP': np.nan, 'Test_TN': np.nan, 'Test_FP': np.nan, 'Test_FN': np.nan, 
-                    'Test_ROC_AUC': np.nan, 'Test_MCC': np.nan,
-                    
-                    'Error_Log': traceback.format_exc()
-                }
-                results.append(err_row)
-            finally:
-                if tracemalloc.is_tracing():
-                    tracemalloc.stop()
-                pbar.update(1)
-                
     pbar.close()
     pd.DataFrame(results).to_csv(output_path, index=False)
-    return True 
+    return True
+
 
 if __name__ == "__main__":
-    SCENARIO = "scaled" 
-    ASK_TO_CONTINUE = True
-    TIMEOUT_SECONDS = 10
-    
-    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-    INPUT_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, '../data/3 - interim'))
-    
-    if SCENARIO == "raw":
-        OUTPUT_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, '../data/4 - results/1 - raw'))
-    elif SCENARIO == "scaled":
-        OUTPUT_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, '../data/4 - results/2 - scaled'))
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    input_dir  = os.path.abspath(os.path.join(script_dir, '../data/1 - datasets'))
+    output_dir = os.path.abspath(os.path.join(script_dir, '../data/2 - results'))
 
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
 
-    csv_files =[f for f in os.listdir(INPUT_DIR) if f.endswith('.csv')]
+    csv_files = [f for f in os.listdir(input_dir) if f.endswith('.csv')]
 
-    pbar_overall = tqdm(total=len(csv_files), desc=f"Overall ({SCENARIO.upper()})", position=0, leave=True)
+    pbar_overall = tqdm(total=len(csv_files), desc="Overall Progress", position=0, leave=True)
 
-    for i, file in enumerate(csv_files):
-        full_path = os.path.join(INPUT_DIR, file)
-        
-        exec_status = run_experiment(full_path, OUTPUT_DIR, SCENARIO)
-        
+    for file in csv_files:
+        full_path   = os.path.join(input_dir, file)
+        exec_status = run_experiment(full_path, output_dir, n_jobs=-1)
         pbar_overall.update(1)
-        
         if not exec_status:
             pbar_overall.refresh()
-            continue
-        
-        if ASK_TO_CONTINUE and i < len(csv_files) - 1:
-            should_continue = ask_to_continue_with_timeout(TIMEOUT_SECONDS)
-            
-            if not should_continue:
-                tqdm.write("\nAborted.")
-                break
 
     pbar_overall.close()
