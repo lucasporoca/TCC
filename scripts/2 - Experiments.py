@@ -331,46 +331,41 @@ def run_experiment(file_path, output_dir, n_jobs=-1):
     models_with_convergence = ['LogisticRegression', 'SVM', 'MLP']
 
     preprocessors_dict = {
-        'Baseline':           (None, None),
-        'Standard Scaling':   (None, StandardScaler()),
-        'MinMax Scaling':     (None, MinMaxScaler()),
-        'IQR Capping':           (OutlierCapper(tail='both', fold=1.5), None),
-        'IQR Capping + Scaling': (OutlierCapper(tail='both', fold=1.5), StandardScaler()),
-        'IQR Removal': (None, FunctionSampler(func=outlier_trimmer, kw_args={'fold': 1.5}, validate=False)),
-        'IQR Removal + Scaling': (None, [
-            ('trimmer', FunctionSampler(func=outlier_trimmer, kw_args={'fold': 1.5}, validate=False)),
-            ('scaler',  StandardScaler())
+        'Baseline':               (None, None),
+        
+        'Standard Scaling':       (None, StandardScaler()),
+        'MinMax Scaling':         (None, MinMaxScaler()),
+        
+        'IQR Capping':            (OutlierCapper(tail='both', fold=1.5), None),
+        'IQR Removal':            (None, FunctionSampler(func=outlier_trimmer, kw_args={'fold': 1.5}, validate=False)),
+        
+        'Yeo-Johnson':            (PowerTransformer(method='yeo-johnson', standardize=False), None),
+        'Quantile Transform':     (QuantileTransformer(output_distribution='normal', random_state=42), None),
+        
+        'Uniform Binning':        (KBinsDiscretizer(n_bins=5, encode='ordinal', strategy='uniform'), None),
+        'Quantile Binning':       (KBinsDiscretizer(n_bins=5, encode='ordinal', strategy='quantile', quantile_method='averaged_inverted_cdf'), None),
+        
+        'Select Percentile (MI)': (None, SelectPercentile(score_func=partial(mutual_info_classif, random_state=42), percentile=50)),
+        
+        'PCA (Raw + No Whiten)':  (None, PCA(n_components=0.95, random_state=42, whiten=False)),
+        
+        'PCA (Raw + Whiten)':     (None, PCA(n_components=0.95, random_state=42, whiten=True)),
+        
+        'PCA (Scaled + No Whiten)': (None, [
+            ('scaler', StandardScaler()),
+            ('pca',    PCA(n_components=0.95, random_state=42, whiten=False))
         ]),
-        'Yeo-Johnson':           (PowerTransformer(method='yeo-johnson', standardize=False), None),
-        'Yeo-Johnson + Scaling': (PowerTransformer(method='yeo-johnson', standardize=False), StandardScaler()),
-        'Quantile Transform':           (QuantileTransformer(output_distribution='normal', random_state=42), None),
-        'Quantile Transform + Scaling': (QuantileTransformer(output_distribution='normal', random_state=42), StandardScaler()),
-        'Uniform Binning':           (KBinsDiscretizer(n_bins=5, encode='ordinal', strategy='uniform'), None),
-        'Uniform Binning + Scaling': (KBinsDiscretizer(n_bins=5, encode='ordinal', strategy='uniform'), StandardScaler()),
-        'Quantile Binning':           (KBinsDiscretizer(n_bins=5, encode='ordinal', strategy='quantile', quantile_method='averaged_inverted_cdf'), None),
-        'Quantile Binning + Scaling': (KBinsDiscretizer(n_bins=5, encode='ordinal', strategy='quantile', quantile_method='averaged_inverted_cdf'), StandardScaler()),
-        'PCA': (None, PCA(n_components=0.95, random_state=42, whiten=False)),
-        'PCA + Scaling': (None, [
-            ('scaler_pre',  StandardScaler()),
-            ('pca',         PCA(n_components=0.95, random_state=42, whiten=False)),
-            ('scaler_post', StandardScaler())
+        
+        'PCA (Scaled + Whiten)':  (None, [
+            ('scaler', StandardScaler()),
+            ('pca',    PCA(n_components=0.95, random_state=42, whiten=True))
         ]),
-        'SMOTE':           (None, SMOTE(random_state=42)),
-        'SMOTE + Scaling': (None, [
+
+        'Random Undersampling':   (None, RandomUnderSampler(random_state=42)),
+        'SMOTE (Raw)':            (None, SMOTE(random_state=42)),
+        'SMOTE (Scaled)':         (None, [
             ('scaler', StandardScaler()),
             ('smote',  SMOTE(random_state=42))
-        ]),
-        'Select Percentile (MI)': (None, SelectPercentile(
-            score_func=partial(mutual_info_classif, random_state=42), percentile=50
-        )),
-        'Select Percentile (MI) + Scaling': (None, [
-            ('select', SelectPercentile(score_func=partial(mutual_info_classif, random_state=42), percentile=50)),
-            ('scaler', StandardScaler())
-        ]),
-        'Random Undersampling':           (None, RandomUnderSampler(random_state=42)),
-        'Random Undersampling + Scaling': (None, [
-            ('rus',    RandomUnderSampler(random_state=42)),
-            ('scaler', StandardScaler())
         ])
     }
 

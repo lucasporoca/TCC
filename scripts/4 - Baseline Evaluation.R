@@ -1,42 +1,33 @@
-install.packages("remotes")
 install.packages("tidyverse")
-
 remotes::install_github("b0rxa/scmamp", force=TRUE)
-BiocManager::install("Rgraphviz")
 
 library(tidyverse)
 library(scmamp)
 
-df <- read_csv('experiment_results.csv')
+results_df <- read_csv('../data/aggregated_results.csv')
 
-df_pivot <- df |> 
+baseline_df <- results_df |> 
   filter(Preprocessor == "Baseline") |> 
-  pivot_wider(
-    names_from = Model,
-    values_from = `F1 Macro`,
-    id_cols = Dataset
-  ) |> 
-  select(-Dataset)
+  select(Dataset, Model, Test_MCC) |> 
+  pivot_wider(names_from = Model, values_from = Test_MCC)
 
-################################################################################
-# Simulação de Dados Futuros
-set.seed(42)
-model_names <- colnames(df_pivot)
+baseline_matrix <- baseline_df |> select(-Dataset)
 
-simulated_data <- map_df(1:17, function(i) {
-  base_performance <- runif(length(model_names), 0.70, 0.85)
-  names(base_performance) <- model_names
-  
-  performance <- base_performance + c(0.10, 0.02, 0.08, -0.05, 0.01, -0.15)
-  performance <- pmin(pmax(performance, 0), 1)
-  performance <- performance + runif(length(model_names), -0.02, 0.02)
-})
+baseline_posthoc <- postHocTest(baseline_matrix, test = 'friedman', correct = 'bergmann', use.rank = TRUE)
 
-df_pivot <- bind_rows(df_pivot, simulated_data)
-################################################################################
+png("../images/algorithms_baseline.png", width = 1000, height = 400, res = 120)
+plotRanking(pvalues = baseline_posthoc$corrected.pval, summary = baseline_posthoc$summary)
+dev.off()
 
-imanDavenportTest(df_pivot)
+scaled_df <- results_df |> 
+  filter(Preprocessor == "Standard Scaling") |> 
+  select(Dataset, Model, Test_MCC) |> 
+  pivot_wider(names_from = Model, values_from = Test_MCC)
 
-test.res <- postHocTest(data = df_pivot, test = 'friedman', correct = 'bergmann', use.rank = TRUE)
+scaled_matrix <- scaled_df |> select(-Dataset)
 
-plotRanking(pvalues=test.res$corrected.pval, summary=test.res$summary)
+scaled_posthoc <- postHocTest(scaled_matrix, test = 'friedman', correct = 'bergmann', use.rank = TRUE)
+
+png("../images/algorithms_scaled.png", width = 1000, height = 400, res = 120)
+plotRanking(pvalues = scaled_posthoc$corrected.pval, summary = scaled_posthoc$summary)
+dev.off()
