@@ -1,0 +1,45 @@
+Perspective,Comparison,Fixed_Factor,Significant_Differences,Datasets_Used
+Equality,Model,Baseline,15,35
+Equality,Model,IQR Capping,16,35
+Equality,Model,IQR Removal,14,35
+Equality,Model,LDA,10,35
+Equality,Model,MinMax Scaling,16,35
+Equality,Model,PCA,11,35
+Equality,Model,Quantile Binning,12,35
+Equality,Model,Quantile Transform,14,35
+Equality,Model,Random Undersampling,15,35
+Equality,Model,SMOTE,9,35
+Equality,Model,Select Percentile (ANOVA),14,35
+Equality,Model,Select Percentile (MI),15,35
+Equality,Model,Standard Scaling,15,35
+Equality,Model,Uniform Binning,16,35
+Equality,Model,Yeo-Johnson,14,35
+Equality,Preprocessor,GaussianNB,23,35
+Equality,Preprocessor,KNN,59,35
+Equality,Preprocessor,LogisticRegression,56,35
+Equality,Preprocessor,MLP,70,35
+Equality,Preprocessor,RandomForest,68,35
+Equality,Preprocessor,SVM,62,35
+Equality,Preprocessor,XGBoost,67,35
+Equity,Model,Baseline,15,35
+Equity,Model,IQR Capping,16,35
+Equity,Model,IQR Removal,11,35
+Equity,Model,LDA,10,35
+Equity,Model,MinMax Scaling,15,35
+Equity,Model,PCA,11,35
+Equity,Model,Quantile Binning,14,35
+Equity,Model,Quantile Transform,14,35
+Equity,Model,Random Undersampling,16,35
+Equity,Model,SMOTE,9,35
+Equity,Model,Select Percentile (ANOVA),14,35
+Equity,Model,Select Percentile (MI),14,35
+Equity,Model,Standard Scaling,15,35
+Equity,Model,Uniform Binning,13,35
+Equity,Model,Yeo-Johnson,15,35
+Equity,Preprocessor,GaussianNB,24,35
+Equity,Preprocessor,KNN,38,35
+Equity,Preprocessor,LogisticRegression,59,35
+Equity,Preprocessor,MLP,56,35
+Equity,Preprocessor,RandomForest,68,35
+Equity,Preprocessor,SVM,52,35
+Equity,Preprocessor,XGBoost,67,35

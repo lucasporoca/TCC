@@ -299,15 +299,15 @@ def run_experiment(file_path, output_dir, n_jobs=-1):
     y.index = X.index
 
     models = {
-        'GaussianNB': GaussianNB(),
-        'LogisticRegression': LogisticRegression(random_state=42, max_iter=1000, n_jobs=1),
+        'GNB': GaussianNB(),
+        'LR': LogisticRegression(random_state=42, max_iter=1000, n_jobs=1),
         'KNN': KNeighborsClassifier(n_jobs=1),
         'SVM': SVC(random_state=42, max_iter=1000),
-        'RandomForest': RandomForestClassifier(random_state=42, n_jobs=1),
+        'RF': RandomForestClassifier(random_state=42, n_jobs=1),
         'MLP': MLPClassifier(random_state=42, max_iter=1000),
-        'XGBoost': XGBClassifier(random_state=42, eval_metric='logloss', n_jobs=1)
+        'XGB': XGBClassifier(random_state=42, eval_metric='logloss', n_jobs=1)
     }
-    models_with_convergence = ['LogisticRegression', 'SVM', 'MLP']
+    models_with_convergence = ['LR', 'SVM', 'MLP']
 
     preprocessors_dict = {
         'Baseline': [],
@@ -325,8 +325,8 @@ def run_experiment(file_path, output_dir, n_jobs=-1):
         'Random Undersampling': [('rus', RandomUnderSampler(random_state=42))],
         'SMOTE (Raw)': [('smote', SMOTE(random_state=42))],
         'SMOTE (Scaled)': [('scaler', StandardScaler()), ('smote', SMOTE(random_state=42))],
-        'Select Percentile (ANOVA)': [('sel', SelectPercentile(score_func=f_classif, percentile=50))],
-        'Select Percentile (MI)': [('sel', SelectPercentile(score_func=partial(mutual_info_classif, random_state=42), percentile=50))]
+        'Select Percentile (ANOVA)': [('sel', SelectPercentile(score_func=f_classif, percentile=10))],
+        'Select Percentile (MI)': [('sel', SelectPercentile(score_func=partial(mutual_info_classif, random_state=42), percentile=10))]
     }
 
     cv = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
@@ -363,9 +363,9 @@ def run_experiment(file_path, output_dir, n_jobs=-1):
             results.extend(base_results)
             pbar.update(1)
             
-            if m_name in ['SVM', 'LogisticRegression', 'KNN', 'MLP']:
+            if m_name in ['SVM', 'LR', 'KNN', 'MLP']:
                 custom_step = [('custom_scaler', StandardScaler())]
-            elif m_name == 'GaussianNB':
+            elif m_name == 'GNB':
                 custom_step = [('custom_qt', QuantileTransformer(output_distribution='normal', random_state=42))]
             else:
                 custom_step = []

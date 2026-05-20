@@ -37,14 +37,7 @@ def calculate_dataset_metadata(df):
     }
 
 
-def clean_and_sample_dataset(df):
-    """if len(df) > 10_000:
-        sampled_df, _ = train_test_split(
-            df, train_size=10_000, stratify=df['target'], random_state=42
-        )
-    else:
-        sampled_df = df.copy()"""
-
+def clean_dataset(df):
     sampled_df = df.copy()
 
     nunique_counts = sampled_df.nunique(dropna=True)
@@ -121,7 +114,7 @@ def main():
 
         meta_raw = calculate_dataset_metadata(raw_df)
 
-        processed_df = clean_and_sample_dataset(raw_df)
+        processed_df = clean_dataset(raw_df)
         processed_df = rename_dataset_columns(processed_df, is_categorical_map)
 
         meta_clean = calculate_dataset_metadata(processed_df)

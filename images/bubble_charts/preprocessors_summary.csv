@@ -1,0 +1,15 @@
+Perspective,Model,Max MCC,Min Time,Min Memory,Best Trade-off
+Equality,GNB,LDA,Select Percentile (ANOVA),Baseline,LDA
+Equality,KNN,Standard Scaling,Select Percentile (ANOVA),Baseline,Standard Scaling
+Equality,LR,SMOTE,LDA,Baseline,PCA
+Equality,MLP,SMOTE,Random Undersampling,Baseline,LDA
+Equality,RF,MinMax Scaling,Random Undersampling,Baseline,Random Undersampling
+Equality,SVM,SMOTE,Random Undersampling,Baseline,Standard Scaling
+Equality,XGB,Baseline,Select Percentile (ANOVA),Baseline,Random Undersampling
+Equity,GNB,LDA,LDA,Baseline,LDA
+Equity,KNN,Yeo-Johnson,Select Percentile (ANOVA),Standard Scaling,Standard Scaling
+Equity,LR,Random Undersampling,Select Percentile (ANOVA),Standard Scaling,Random Undersampling
+Equity,MLP,SMOTE,LDA,Baseline,LDA
+Equity,RF,MinMax Scaling,Random Undersampling,Baseline,Random Undersampling
+Equity,SVM,SMOTE,Random Undersampling,Baseline,Random Undersampling
+Equity,XGB,Baseline,Select Percentile (ANOVA),Baseline,Random Undersampling
