@@ -98,7 +98,6 @@ def process_metadata(df):
 
     df.columns = df.columns.str.replace('_clean', '')
     
-    # Mantém o prefixo MF_ para segurança dos dados internos
     rename_dict = {col: f'MF_{col}' for col in df.columns if col != 'Dataset'}
     df = df.rename(columns=rename_dict)
     
@@ -164,7 +163,6 @@ def generate_shap_heatmap(X, shap_interactions, prep_cols, meta_cols):
 def plot_top_metafeature_dynamics(X, shap_interactions, prep_cols, meta_name, save_dir, top_k=5):
     idx_m = X.columns.get_loc(meta_name)
     
-    # Cria o nome de exibição removendo o prefixo "MF_"
     display_meta_name = meta_name.replace('MF_', '')
     
     prep_impacts = {}
@@ -197,15 +195,14 @@ def plot_top_metafeature_dynamics(X, shap_interactions, prep_cols, meta_name, sa
     
     fig, ax = plt.subplots(figsize=(7.5, 4.5))
     
-    # --- ALTERAÇÃO AQUI: De scatterplot para lineplot ---
     sns.lineplot(
         data=df_plot,
         x='Meta_Feature', 
         y='SHAP_Interaction', 
         hue='Preprocessor',
-        marker='o',       # Mantém uma bolinha marcando onde o dado real existe
+        marker='o',
         alpha=0.8, 
-        linewidth=1.5,    # Linha um pouco mais grossa para destacar
+        linewidth=1.5,
         palette='Set1',
         ax=ax
     )
